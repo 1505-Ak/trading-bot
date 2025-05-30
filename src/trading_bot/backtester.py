@@ -1,6 +1,10 @@
 import backtrader as bt
 import datetime
 import pandas as pd
+import numpy as np
+import os
+import ray
+from ray.tune.registry import register_env
 
 from .utils import load_historical_data
 # We will import TradingAgent when we integrate it more deeply
@@ -114,20 +118,13 @@ class RLTradingStrategy(bt.Strategy):
         # Action 0 (Hold) - do nothing
 
 
-def run_backtest(data_df, agent_class, agent_config, env_config, 
+def run_backtest(data_df, agent_instance, env_config, 
                  initial_cash=10000.0, commission_rate=0.001, 
                  strategy_params=None):
     cerebro = bt.Cerebro()
 
-    # Instantiate agent (assuming agent needs env_config or specific parts of it)
-    # This part is tricky because the agent is trained on an *environment instance*
-    # For backtesting, we pass the agent instance directly to the strategy
-    # The agent is pre-trained.
-    # For now, let's assume agent_class can be instantiated with just agent_config, or is already an instance
-    # If agent_class is indeed a class:
-    #  trading_agent = agent_class(env_name_or_creator=lambda cfg: TradingEnvironment(**cfg), agent_config=agent_config)
-    # If agent_class is already an instance (more likely for a pre-trained agent):
-    trading_agent = agent_class # if agent_class is actually an agent instance
+    # Agent is already an instance
+    trading_agent = agent_instance 
 
     # Convert pandas DataFrame to Backtrader data feed
     # Ensure DataFrame index is datetime
@@ -205,32 +202,37 @@ def run_backtest(data_df, agent_class, agent_config, env_config,
     # cerebro.plot() # Optional: Plot results if matplotlib is installed and configured
     return analysis
 
-if __name__ == '__main__':
-    import numpy as np
-    from .agent import TradingAgent # For the dummy agent
-    from .environment import TradingEnvironment # For dummy env config reference
+# Path to the checkpoint you want to load for backtesting
+# Example: "./rllib_checkpoints/PPO_TradingEnv-v0_..../checkpoint_000010/checkpoint-10"
+# You need to replace this with an actual path to a checkpoint file saved by train_agent.py
+CHECKPOINT_TO_LOAD_PATH = None # IMPORTANT: SET THIS PATH!
 
-    # Create a dummy agent that takes random actions or simple logic
-    class DummyAgent:
-        def __init__(self, action_space_n):
-            self.action_space_n = action_space_n
-            self.trainer = True # Mock trainer attribute
+# Backtesting data file
+BACKTEST_DATA_FILE_PATH = "dummy_market_data_backtest.csv"
 
-        def predict(self, observation):
-            # Simple logic: if close > open buy, if close < open sell, else hold
-            # This requires observation to be structured in a way we can infer this.
-            # For a generic dummy, let's just pick randomly for now.
-            return np.random.randint(0, self.action_space_n)
-        
-        def get_policy(self): # Mock method
-            return None
+# Environment config for backtesting (should be consistent with training env features)
+BACKTEST_ENV_CONFIG = {
+    'initial_balance': 10000,
+    'lookback_window_size': 10, 
+    'features': ['Open', 'High', 'Low', 'Close', 'Volume']
+}
 
-    # 1. Load Data
-    # Create a dummy CSV for testing if utils.py was not run to create it
-    dummy_csv_path = "dummy_market_data_backtest.csv"
-    if not pd.io.common.file_exists(dummy_csv_path):
-        num_rows = 252 * 2 # Approx 2 years of daily data
-        test_data = pd.DataFrame({
+# Agent config for initializing the agent structure before loading checkpoint
+# Should match the core structure of the agent used for training (e.g., framework)
+# The env name here will be specific to backtesting if we re-register.
+BACKTEST_AGENT_CONFIG = {
+    "framework": "torch",
+    "env": "BacktestTradingEnv-v0", # Registered env for backtesting
+    "num_workers": 0, # Not needed for inference/backtesting usually
+    "num_gpus": 0,
+    # Ensure this matches the model config used during training if custom model was used
+    # "model": {"custom_model": "your_custom_model_name_if_any"}
+}
+
+def create_dummy_backtest_data(file_path, num_rows=252 * 2):
+    if not os.path.exists(file_path):
+        print(f"Creating dummy backtest data at: {file_path}")
+        data = pd.DataFrame({
             'Timestamp': pd.to_datetime('2022-01-01') + pd.to_timedelta(np.arange(num_rows), 'D'),
             'Open': np.random.rand(num_rows) * 50 + 100,
             'High': np.random.rand(num_rows) * 10 + 125,
@@ -238,59 +240,100 @@ if __name__ == '__main__':
             'Close': np.random.rand(num_rows) * 50 + 100,
             'Volume': np.random.randint(10000, 50000, size=num_rows)
         })
-        test_data['High'] = test_data[['Open', 'Close']].max(axis=1) + np.random.rand(num_rows) * 5
-        test_data['Low'] = test_data[['Open', 'Close']].min(axis=1) - np.random.rand(num_rows) * 5
-        test_data.to_csv(dummy_csv_path, index=False)
-        print(f"Created dummy CSV for backtesting: {dummy_csv_path}")
-
-    df = load_historical_data(dummy_csv_path, date_col='Timestamp')
-
-    if df is not None and not df.empty:
-        # 2. Define Environment Configuration (consistent with agent training)
-        env_config_params = {
-            'df': df, # The actual df is not used by agent init, but for reference to params
-            'initial_balance': 10000,
-            'lookback_window_size': 10,
-            'features': ['Open', 'High', 'Low', 'Close', 'Volume']
-        }
-
-        # 3. Setup Agent
-        # For this example, we use a DummyAgent. In a real scenario, you'd load a trained TradingAgent.
-        # The TradingAgent expects an env_name_or_creator for its internal RLlib trainer config.
-        # However, for backtesting with a *pre-trained* agent, we pass the agent instance directly.
-        dummy_action_space_size = 3 # Corresponds to Buy/Sell/Hold in our TradingEnvironment
-        
-        # For a real agent, you would load it, e.g.:
-        # agent_config_ppo = { 'framework': 'torch', 'num_workers': 0 }
-        # trained_agent = TradingAgent(env_name_or_creator=lambda cfg: TradingEnvironment(**cfg), agent_config=agent_config_ppo) # if defining here
-        # trained_agent.load_checkpoint("path/to/your/checkpoint")
-        # current_agent_to_test = trained_agent
-
-        current_agent_to_test = DummyAgent(action_space_n=dummy_action_space_size)
-        print("Using DummyAgent for this backtest run.")
-
-        # Agent config (can be empty if agent is fully configured or pre-trained)
-        agent_config_params = {}
-
-        # 4. Run Backtest
-        try:
-            analysis_results = run_backtest(
-                data_df=df,
-                agent_class=current_agent_to_test, # Pass the agent *instance*
-                agent_config=agent_config_params, 
-                env_config=env_config_params, # Used for strategy params like lookback
-                initial_cash=10000.0,
-                commission_rate=0.001
-            )
-        except Exception as e:
-            print(f"Error during backtest run: {e}")
-            import traceback
-            traceback.print_exc()
+        data['High'] = data[['Open', 'Close']].max(axis=1) + np.random.rand(num_rows) * 5
+        data['Low'] = data[['Open', 'Close']].min(axis=1) - np.random.rand(num_rows) * 5
+        data.to_csv(file_path, index=False)
     else:
-        print("Failed to load data, skipping backtest.")
+        print(f"Using existing backtest data from: {file_path}")
 
-    # Optional: Clean up dummy CSV
-    # import os
-    # if pd.io.common.file_exists(dummy_csv_path):
-    #     os.remove(dummy_csv_path)
-    #     print(f"Cleaned up {dummy_csv_path}") 
+# Env creator for backtesting - uses the backtest_df
+def backtest_env_creator(env_config_rllib):
+    df_for_env = env_config_rllib.pop("df", None)
+    if df_for_env is None:
+        raise ValueError("DataFrame ('df') must be provided in env_config_rllib for backtest_env_creator")
+    
+    current_env_config = BACKTEST_ENV_CONFIG.copy()
+    current_env_config.update(env_config_rllib)
+    current_env_config['df'] = df_for_env
+    return TradingEnvironment(**current_env_config)
+
+if __name__ == '__main__':
+    print("Initializing Ray for backtesting...")
+    ray.init(ignore_reinit_error=True, log_to_driver=False) # Log to driver False for less noise
+
+    # 1. Load Data for Backtesting
+    create_dummy_backtest_data(BACKTEST_DATA_FILE_PATH)
+    backtest_df = load_historical_data(BACKTEST_DATA_FILE_PATH, date_col='Timestamp',
+                                       required_cols=BACKTEST_ENV_CONFIG['features'], dropna=True)
+
+    if backtest_df is None or backtest_df.empty:
+        print(f"Failed to load backtest data from {BACKTEST_DATA_FILE_PATH}. Exiting.")
+        ray.shutdown()
+        exit()
+    
+    if len(backtest_df) < BACKTEST_ENV_CONFIG['lookback_window_size'] + 20:
+        print(f"Backtesting data is too short. Exiting.")
+        ray.shutdown()
+        exit()
+
+    # 2. Register Env for Backtesting Agent Initialization
+    # The agent needs an env to initialize its policy structure before loading checkpoint
+    rllib_backtest_env_config = BACKTEST_AGENT_CONFIG.get("env_config", {}).copy()
+    rllib_backtest_env_config["df"] = backtest_df 
+    
+    current_agent_config_for_load = BACKTEST_AGENT_CONFIG.copy()
+    current_agent_config_for_load["env_config"] = rllib_backtest_env_config
+
+    register_env("BacktestTradingEnv-v0", backtest_env_creator)
+    print("Backtest environment 'BacktestTradingEnv-v0' registered.")
+
+    # 3. Setup Agent and Load Checkpoint
+    if CHECKPOINT_TO_LOAD_PATH is None or not os.path.exists(os.path.dirname(CHECKPOINT_TO_LOAD_PATH)):
+        print("\n**************************************************************************************")
+        print(f"CHECKPOINT_TO_LOAD_PATH is not set or directory does not exist: '{CHECKPOINT_TO_LOAD_PATH}")
+        print("Please train an agent using 'train_agent.py' and then set the path to a valid checkpoint file.")
+        print("Skipping backtest with trained agent. You can run with a DummyAgent for structure testing if needed.")
+        print("**************************************************************************************\n")
+        # As a fallback, could run with a DummyAgent like before, but goal is to test trained agent
+        # current_agent_to_test = DummyAgent(action_space_n=3)
+        # print("Using DummyAgent as CHECKPOINT_TO_LOAD_PATH is not set.")
+        ray.shutdown()
+        exit()
+    else:
+        print(f"Attempting to load trained agent from: {CHECKPOINT_TO_LOAD_PATH}")
+        trained_agent = TradingAgent(env_name_or_creator="BacktestTradingEnv-v0", 
+                                     agent_config=current_agent_config_for_load)
+        
+        if trained_agent.trainer:
+            try:
+                trained_agent.load_checkpoint(CHECKPOINT_TO_LOAD_PATH)
+                print(f"Agent checkpoint loaded successfully from {CHECKPOINT_TO_LOAD_PATH}")
+                current_agent_to_test = trained_agent
+            except Exception as e:
+                print(f"Error loading checkpoint: {e}. Please ensure the checkpoint path and agent config are correct.")
+                print("Exiting.")
+                ray.shutdown()
+                exit()
+        else:
+            print("Failed to initialize trainer in TradingAgent for loading checkpoint. Exiting.")
+            ray.shutdown()
+            exit()
+
+    # 4. Run Backtest with the loaded (or dummy) agent
+    print(f"Running backtest with agent: {type(current_agent_to_test).__name__}")
+    try:
+        analysis_results = run_backtest(
+            data_df=backtest_df,
+            agent_instance=current_agent_to_test, # Pass the agent *instance*
+            env_config=BACKTEST_ENV_CONFIG, # For strategy params like lookback window
+            initial_cash=10000.0,
+            commission_rate=0.001
+        )
+    except Exception as e:
+        print(f"Error during backtest run: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("Shutting down Ray...")
+    ray.shutdown()
+    print("Backtesting script finished.") 
