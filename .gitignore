@@ -1,0 +1,22 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# AWS credentials
+.aws/
+
+# Logs and data
+*.log
+data/
+
+# Docker and environment variables
+*.env 
