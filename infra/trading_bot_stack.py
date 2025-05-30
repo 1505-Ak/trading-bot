@@ -5,6 +5,8 @@ from aws_cdk import (
     aws_ecs as ecs,
     aws_iam as iam,
     aws_logs as logs,
+    aws_elasticloadbalancingv2 as elbv2,
+    aws_ecs_patterns as ecs_patterns,
     RemovalPolicy,
     CfnOutput,
     Duration
@@ -61,18 +63,6 @@ class TradingBotStack(Stack):
         #     resources=["arn:aws:s3:::your-checkpoint-bucket/*"]
         # ))
 
-        # --- ECS Task Definition for Fargate ---
-        self.fargate_task_definition = ecs.FargateTaskDefinition(
-            self, "TradingBotTaskDef",
-            memory_limit_mib=512,  # 0.5 GB
-            cpu=256,              # 0.25 vCPU
-            task_role=self.task_role,
-            runtime_platform=ecs.RuntimePlatform(
-                operating_system_family=ecs.OperatingSystemFamily.LINUX,
-                cpu_architecture=ecs.CpuArchitecture.X86_64 # Or ARM64 if your image is ARM
-            )
-        )
-
         # Define the Log Group for the container
         log_group = logs.LogGroup(
             self, "TradingBotApiLogGroup",
@@ -81,36 +71,61 @@ class TradingBotStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
-        self.api_container = self.fargate_task_definition.add_container(
-            "TradingBotApiContainer",
-            image=ecs.ContainerImage.from_ecr_repository(self.api_ecr_repository, tag="latest"), # Assumes image tagged 'latest'
-            logging=ecs.LogDrivers.aws_logs(
-                stream_prefix="api",
-                log_group=log_group
+        # --- Application Load Balanced Fargate Service ---
+        # This pattern creates an ALB, Target Group, Fargate Service, and Task Definition.
+        self.load_balanced_fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self, "TradingBotAlbFargateService",
+            cluster=self.ecs_cluster,  # Use the existing cluster
+            cpu=256,                   # 0.25 vCPU
+            memory_limit_mib=512,      # 0.5 GB
+            desired_count=1,           # Number of tasks to run
+            task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
+                image=ecs.ContainerImage.from_ecr_repository(self.api_ecr_repository, tag="latest"),
+                container_port=8000, # The port your FastAPI app listens on
+                log_driver=ecs.LogDrivers.aws_logs(
+                    stream_prefix="api-alb",
+                    log_group=log_group
+                ),
+                environment={
+                    "API_CHECKPOINT_TO_LOAD_PATH": "/app/rllib_checkpoints/your_checkpoint_file_path_here", # Placeholder!
+                    "PYTHONUNBUFFERED": "1",
+                    # Add other necessary environment variables for your application
+                },
+                task_role=self.task_role # Assign the task role here
             ),
-            port_mappings=[ecs.PortMapping(container_port=8000)],
-            environment={
-                "API_CHECKPOINT_TO_LOAD_PATH": "/app/rllib_checkpoints/your_checkpoint_file_path_here", # Placeholder!
-                "PYTHONUNBUFFERED": "1", # Ensures logs are sent out immediately
-                # Add other necessary environment variables
-            }
+            public_load_balancer=True,  # Creates a public ALB
+            # listener_port=80, # Default is 80 for HTTP. For HTTPS, you'd configure a certificate.
+            # redirect_http=True, # If using HTTPS and want to redirect HTTP to HTTPS
+            # domain_name="your.domain.com", # If using a custom domain with Route53
+            # domain_zone=route53.HostedZone.from_lookup(self, "MyZone", domain_name="your.domain.com"), # If using Route53
+            # certificate=acm.Certificate.from_certificate_arn(self, "Cert", "your_cert_arn"), # For HTTPS
         )
 
-        # --- Fargate Service ---
-        # This service will run our task definition on Fargate.
-        self.fargate_service = ecs.FargateService(
-            self, "TradingBotFargateService",
-            cluster=self.ecs_cluster,
-            task_definition=self.fargate_task_definition,
-            desired_count=1,  # Start with one instance
-            assign_public_ip=True, # Assign public IP for direct access (for testing). For prod, use ALB.
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
-            # health_check_grace_period=Duration.seconds(60) # If your app takes time to start health checks
+        # Health Check configuration for the Target Group
+        self.load_balanced_fargate_service.target_group.configure_health_check(
+            path="/",  # Assuming your API root path (health check) returns 200 OK
+            interval=Duration.seconds(30),
+            timeout=Duration.seconds(5),
+            healthy_threshold_count=2,
+            unhealthy_threshold_count=2,
+            # port="8000" # Traffic port, usually not needed if containerPort is set for task_image_options
         )
+        
+        # Optional: Add auto-scaling for the Fargate service
+        # scaling = self.load_balanced_fargate_service.service.auto_scale_task_count(
+        #     max_capacity=3,
+        #     min_capacity=1
+        # )
+        # scaling.scale_on_cpu_utilization("CpuScaling",
+        #     target_utilization_percent=70,
+        #     scale_in_cooldown=Duration.seconds(60),
+        #     scale_out_cooldown=Duration.seconds(60)
+        # )
 
-        CfnOutput(self, "FargateServiceName", value=self.fargate_service.service_name)
-        # Note: To access the service, you'd get the public IP of the running task.
-        # An ALB would provide a stable DNS endpoint.
+        CfnOutput(self, "LoadBalancerDns", value=self.load_balanced_fargate_service.load_balancer.load_balancer_dns_name)
+        CfnOutput(self, "FargateServiceFullName", value=self.load_balanced_fargate_service.service.service_name)
+
+        # Note: The previous self.fargate_task_definition and self.fargate_service are now managed by ApplicationLoadBalancedFargateService
 
         # --- Next steps: Application Load Balancer ---
         # Example: VPC, ECS Cluster, Fargate Service, Load Balancer 
