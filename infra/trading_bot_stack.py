@@ -1,7 +1,10 @@
 from aws_cdk import (
     Stack,
     aws_ecr as ecr,
-    RemovalPolicy
+    aws_ec2 as ec2,
+    aws_ecs as ecs,
+    RemovalPolicy,
+    CfnOutput
 )
 from constructs import Construct
 
@@ -20,11 +23,27 @@ class TradingBotStack(Stack):
                                                  # RETAIN (default) would keep it. Choose based on your needs.
                                                  # For dev/testing, DESTROY is often fine.
         )
-
-        # Output the ECR repository URI
-        # CfnOutput(self, "ApiEcrRepoUri", value=self.api_ecr_repository.repository_uri)
-        # Using the below for more direct access to the value if needed by other tools/scripts
+        CfnOutput(self, "ApiEcrRepoUri", value=self.api_ecr_repository.repository_uri)
         self.ecr_repo_uri = self.api_ecr_repository.repository_uri
 
-        # --- Next steps would be to define ECS/Fargate services, ALB, etc. ---
+        # --- VPC for our application ---
+        # This will create a new VPC with public and private subnets across multiple AZs by default.
+        self.vpc = ec2.Vpc(
+            self, "TradingBotVpc",
+            max_azs=2,  # Limit to 2 AZs for cost/simplicity, can be adjusted
+            nat_gateways=1 # Cost optimization: 1 NAT Gateway instead of 1 per AZ. 
+                           # For high availability, you might want more.
+        )
+        CfnOutput(self, "VpcId", value=self.vpc.vpc_id)
+
+        # --- ECS Cluster ---
+        # This cluster will host our Fargate services.
+        self.ecs_cluster = ecs.Cluster(
+            self, "TradingBotCluster",
+            vpc=self.vpc,
+            cluster_name="trading-bot-cluster"
+        )
+        CfnOutput(self, "EcsClusterName", value=self.ecs_cluster.cluster_name)
+
+        # --- Next steps: ECS Task Definition, Fargate Service, Application Load Balancer ---
         # Example: VPC, ECS Cluster, Fargate Service, Load Balancer 
