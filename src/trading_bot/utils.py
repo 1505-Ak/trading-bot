@@ -81,9 +81,32 @@ def load_historical_data(file_path, date_col=None, required_cols=None,
     return df
 
 
+def add_sma_feature(df, window=20, price_col='Close'):
+    """
+    Adds a Simple Moving Average (SMA) feature to the DataFrame.
+
+    Args:
+        df (pd.DataFrame): Input DataFrame with market data.
+        window (int): The window size for the SMA.
+        price_col (str): The name of the column to calculate SMA on (e.g., 'Close').
+
+    Returns:
+        pd.DataFrame: DataFrame with the new SMA column added.
+                      Returns the original DataFrame if price_col is not found.
+    """
+    if price_col not in df.columns:
+        print(f"Error: Price column '{price_col}' not found for SMA calculation.")
+        return df
+    
+    sma_col_name = f'SMA_{window}'
+    df[sma_col_name] = df[price_col].rolling(window=window, min_periods=1).mean()
+    print(f"Added '{sma_col_name}' feature.")
+    return df
+
+
 if __name__ == '__main__':
     # Create a dummy CSV for testing
-    dummy_csv_path = "dummy_market_data.csv"
+    dummy_csv_path = "dummy_market_data_utils.csv"
     num_rows = 100
     data = pd.DataFrame({
         'Timestamp': pd.to_datetime('2023-01-01') + pd.to_timedelta(np.arange(num_rows), 'D'),
@@ -109,8 +132,15 @@ if __name__ == '__main__':
     print("\n--- Test 1: Basic Load with Date Column ---")
     df_loaded = load_historical_data(dummy_csv_path, date_col='Timestamp')
     if df_loaded is not None:
+        print("Original df head:")
         print(df_loaded.head())
-        print(df_loaded.info())
+        
+        print("\n--- Test: Adding SMA_20 Feature ---")
+        df_with_sma = add_sma_feature(df_loaded.copy(), window=20, price_col='Close')
+        print(df_with_sma.head(25)) # Print more rows to see SMA values populate
+        print(df_with_sma.info())
+        # Note: SMA will have NaNs for initial period < window size if min_periods is not 1.
+        # Our add_sma_feature uses min_periods=1, so it populates from the start.
 
     print("\n--- Test 2: Custom OHLCV Names & No Drop NA ---")
     # Create another dummy with different column names
