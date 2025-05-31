@@ -104,6 +104,40 @@ def add_sma_feature(df, window=20, price_col='Close'):
     return df
 
 
+def add_rsi_feature(df, window=14, price_col='Close'):
+    """
+    Adds a Relative Strength Index (RSI) feature to the DataFrame.
+
+    Args:
+        df (pd.DataFrame): Input DataFrame with market data.
+        window (int): The window size for the RSI (typically 14).
+        price_col (str): The name of the column to calculate RSI on (e.g., 'Close').
+
+    Returns:
+        pd.DataFrame: DataFrame with the new RSI column added.
+                      Returns the original DataFrame if price_col is not found.
+    """
+    if price_col not in df.columns:
+        print(f"Error: Price column '{price_col}' not found for RSI calculation.")
+        return df
+
+    delta = df[price_col].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window, min_periods=1).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window, min_periods=1).mean()
+
+    rs = gain / loss
+    rsi_col_name = f'RSI_{window}'
+    df[rsi_col_name] = 100 - (100 / (1 + rs))
+    
+    # Handle cases where loss is zero (prevents inf RSI)
+    df[rsi_col_name].replace([np.inf, -np.inf], 100, inplace=True) # If gain > 0 and loss = 0, RSI is 100
+    df[rsi_col_name].fillna(50, inplace=True) # Fill initial NaNs (e.g., first row if diff() makes it NaN)
+                                            # or if gain and loss are both 0, RSI is undefined (NaN from rs=0/0), use 50.
+
+    # print(f"Added '{rsi_col_name}' feature.") # Less verbose
+    return df
+
+
 if __name__ == '__main__':
     # Create a dummy CSV for testing
     dummy_csv_path = "dummy_market_data_utils.csv"
@@ -174,4 +208,25 @@ if __name__ == '__main__':
     # os.remove(dummy_csv_path)
     # os.remove(dummy_custom_names_path)
     # os.remove(dummy_missing_col_path)
-    # print("\nCleaned up dummy CSV files.") 
+    # print("\nCleaned up dummy CSV files.")
+
+    print("\n--- Test 1: Load Data & Add Features ---")
+    df_loaded = load_historical_data(dummy_csv_path, date_col='Timestamp', dropna=False) # Use dropna=False for better feature calculation demo
+    if df_loaded is not None:
+        print("Original df head (after load_historical_data ffill/bfill):")
+        print(df_loaded.head())
+        print(df_loaded.info())
+        
+        df_featured = df_loaded.copy()
+        df_featured = add_sma_feature(df_featured, window=20)
+        df_featured = add_rsi_feature(df_featured, window=14)
+        
+        print("\n--- DataFrame with SMA and RSI Features (first 25 rows) ---")
+        print(df_featured.head(25))
+        print(df_featured.info())
+        print(f"NaNs remaining after feature engineering: {df_featured.isnull().sum().sum()}")
+        
+        # Final check: drop any NaNs that might have been introduced by feature calculations if not handled perfectly by min_periods or ffill in functions
+        df_featured.dropna(inplace=True) 
+        print(f"NaNs after final dropna: {df_featured.isnull().sum().sum()}")
+        print("Shape after final dropna:", df_featured.shape) 
